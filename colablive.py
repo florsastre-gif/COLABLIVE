@@ -1,102 +1,88 @@
 import streamlit as st
-import tempfile
 import os
-
-# Importaciones de LangChain
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from typing import Annotated, TypedDict
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langgraph.graph import StateGraph, END
 
 # 1. Configuración de la Página
-st.set_page_config(page_title="Conchita RAG Explorer", page_icon="🕵️‍♀️", layout="wide")
-st.title("🕵️‍♀️ Conchita RAG: Preguntas con Trazabilidad")
-st.markdown("Sube un documento (PDF/TXT), pregunta y **mira qué está leyendo la IA**.")
+st.set_page_config(page_title="IA para Jóvenes", page_icon="📖", layout="wide")
+st.title("📖 El Cuentacuentos de la IA")
+st.markdown("Pregunta sobre cualquier novedad de IA y te la explicaré como una historia para jóvenes.")
 
-# 2. Sidebar: Configuración y Carga
+# 2. Sidebar: Configuración de API Keys
 with st.sidebar:
-    st.header("1. Configuración")
-    api_key = st.text_input("Google API Key:", type="password")
+    st.header("🔑 Configuración")
+    google_key = st.text_input("Google API Key:", type="password")
+    tavily_key = st.text_input("Tavily API Key:", type="password")
+    
+    if google_key and tavily_key:
+        os.environ["GOOGLE_API_KEY"] = google_key
+        os.environ["TAVILY_API_KEY"] = tavily_key
+        st.success("APIs configuradas")
 
-    st.header("2. Tus Datos")
-    uploaded_file = st.file_uploader("Sube tu archivo", type=["pdf", "txt"])
+# 3. Estructura de LangGraph (El Cerebro)
+class AgentState(TypedDict):
+    question: str
+    search_results: str
+    final_story: str
 
-    if api_key:
-        os.environ["GOOGLE_API_KEY"] = api_key
+def tool_search_news(state: AgentState):
+    """Busca las últimas noticias en Tavily"""
+    search = TavilySearchResults(max_results=3)
+    results = search.invoke(state["question"])
+    return {"search_results": str(results)}
 
-# 3. Función de Procesamiento
-@st.cache_resource
-def procesar_documento(uploaded_file):
-    # Guardar archivo temporalmente
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
-        tmp_file.write(uploaded_file.getvalue())
-        tmp_path = tmp_file.name
+def generator_story(state: AgentState):
+    """Transforma la info en una historia para jóvenes"""
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
+    
+    prompt = f"""
+    Eres un narrador experto en tecnología para niños y jóvenes. 
+    Tu misión es explicar las siguientes noticias de forma super simple, como si fuera una aventura o un cuento.
+    
+    NOTICIAS ENCONTRADAS:
+    {state['search_results']}
+    
+    PREGUNTA DEL USUARIO:
+    {state['question']}
+    
+    REGLAS:
+    1. Usa un lenguaje muy sencillo (evita tecnicismos).
+    2. Cuéntalo como una historia o metáfora.
+    3. Mantén un tono emocionante y positivo.
+    """
+    
+    response = llm.invoke(prompt)
+    return {"final_story": response.content}
 
-    # A. Loader
-    if uploaded_file.name.endswith('.pdf'):
-        loader = PyPDFLoader(tmp_path)
-    else:
-        loader = TextLoader(tmp_path)
+# Construcción del Grafo
+workflow = StateGraph(AgentState)
+workflow.add_node("buscador", tool_search_news)
+workflow.add_node("escritor", generator_story)
 
-    docs = loader.load()
+workflow.set_entry_point("buscador")
+workflow.add_edge("buscador", "escritor")
+workflow.add_edge("escritor", END)
 
-    # B. Splitter (Segmentación)
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-    splits = text_splitter.split_documents(docs)
+app_graph = workflow.compile()
 
-    # C. Embedding y VectorStore (Chroma)
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
+# 4. Interfaz de Usuario
+if not google_key or not tavily_key:
+    st.warning("👈 Introduce ambas claves en la barra lateral para comenzar.")
+else:
+    pregunta = st.text_input("¿Qué novedad de IA quieres que te cuente hoy?", 
+                             placeholder="Ej: ¿Qué es eso de Sora?")
 
-    return vectorstore.as_retriever()
-
-# 4. Lógica Principal de la App
-if uploaded_file and api_key:
-    with st.spinner("Procesando documento e indexando vectores..."):
-        try:
-            retriever = procesar_documento(uploaded_file)
-            st.success("✅ Documento indexado en ChromaDB")
-        except Exception as e:
-            st.error(f"Error al procesar: {e}")
-            st.stop()
-
-    user_question = st.text_input("Pregunta algo sobre tu documento:")
-
-    if user_question:
-        # Paso 1: Recuperar contexto
-        relevant_docs = retriever.invoke(user_question)
-
-        # Paso 2: Mostrar Trazabilidad
-        with st.expander("🔍 Trazabilidad: ¿Qué fragmentos leyó la IA?"):
-            for i, doc in enumerate(relevant_docs):
-                st.markdown(f"**Fragmento {i+1}** (Página {doc.metadata.get('page', 'N/A')}):")
-                st.info(doc.page_content)
-
-        # Paso 3: Generar Respuesta (Gemini)
-        context_text = "\n\n".join([d.page_content for d in relevant_docs])
-
-        template = """Responde a la pregunta basándote SOLAMENTE en el siguiente contexto:
-        {context}
-
-        Pregunta: {question}
-        """
-        prompt = ChatPromptTemplate.from_template(template)
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash") # Actualizado a la versión estable
-
-        chain = prompt | llm | StrOutputParser()
-
-        with st.spinner("Generando respuesta..."):
-            response = chain.invoke({"context": context_text, "question": user_question})
-            st.subheader("💡 Respuesta:")
-            st.write(response)
-
-elif not api_key:
-    st.warning("👈 Por favor introduce tu API Key en la barra lateral.")
-elif not uploaded_file:
-    st.info("👈 Sube un documento para comenzar.")
+    if pregunta:
+        with st.spinner("Buscando en el mundo digital y escribiendo tu cuento..."):
+            # Ejecución del Grafo
+            inputs = {"question": pregunta}
+            resultado = app_graph.invoke(inputs)
+            
+            # Mostrar resultado
+            st.subheader("✨ Tu historia de IA:")
+            st.write(resultado["final_story"])
+            
+            with st.expander("🔍 Ver fuentes de la noticia (Trazabilidad)"):
+                st.write(resultado["search_results"])
