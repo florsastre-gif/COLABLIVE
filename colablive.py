@@ -37,7 +37,7 @@ def tool_search_news(state: AgentState):
 
 def generator_story(state: AgentState):
     """Transforma las noticias en un cuento simple"""
-    llm = ChatGoogleGenerativeAI(model='gemini-2.0-flash-exp')
+    llm = ChatGoogleGenerativeAI(model='gemini-2.5-flash')
     
     prompt = f"""
     Eres un narrador experto que explica tecnología a jovencitos de 10 años.
